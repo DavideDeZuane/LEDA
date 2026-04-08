@@ -11,11 +11,15 @@ New decoder at `Optimized_Implementation/Common/library/bf_decoding.c`
 
 ## Setup 
 
-The first thing to do is include `libkeccack` 
+The first thing to do is include `libkeccack` builded from XKCP/XKCP, this is available as a submodule. 
 
 Creare script con 
 
 - clone del submodule
+```
+git submodule update --init --recursive
+
+```
 - compilare la librarie 
 ```
 make x86-64/libXKCP.a EXTRA_CFLAGS="-march=native -mtune=native"

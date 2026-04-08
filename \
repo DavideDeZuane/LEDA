@@ -188,6 +188,7 @@ int bf_decoding_CT(DIGIT out[], const POSITION_T HtrPosOnes[N0][V], const POSITI
       value += bit << i;
    }
 
+   printf("Valore del counter plain %d\n", value);
    __m256i candidate[N0*NUM_SLICES_GF2X_ELEMENT] = {0};
 
    for(int z=0; z< N0*NUM_SLICES_GF2X_ELEMENT; z++){
@@ -252,16 +253,15 @@ int bf_decoding_CT(DIGIT out[], const POSITION_T HtrPosOnes[N0][V], const POSITI
 
    printf("Max value position: %u \n", pos);
    
-   printf("DIOPORCONE %lu \n",N0*P);
 
 
-   uint8_t ctrs[N0*P] = {0};
+   int ctrs[N0*NUM_DIGITS_GF2X_ELEMENT] = {0};
 
-   for(int j=0; j<N0*P; j++){
+   for(int j=0; j<N0*NUM_DIGITS_GF2X_ELEMENT; j++){
 
       for(int i=0; i<BITSLICED_OPERAND_WIDTH;i++){
          uint64_t slice_slice;
-         switch(j>>6){
+         switch(j>>5){
             case 0: slice_slice = _mm256_extract_epi64(bs_unsatParityChecks[j >> 8].slice[i],0); break;
             case 1: slice_slice = _mm256_extract_epi64(bs_unsatParityChecks[j >> 8].slice[i],1); break;
             case 2: slice_slice = _mm256_extract_epi64(bs_unsatParityChecks[j >> 8].slice[i],2); break;
@@ -273,15 +273,10 @@ int bf_decoding_CT(DIGIT out[], const POSITION_T HtrPosOnes[N0][V], const POSITI
       }
    }
 
-   POSITION_T flip_pos = argmax_avx2(ctrs, N0*P);
-   printf("position max %d\n", flip_pos);
-   
-   int max = 0;
-   for(int i=0; i<N0*P; i++){
-      if(ctrs[i]>max) max = ctrs[i];
-   }
+   printf("Valore del counter %d\n", ctrs[0]);
+   printf("Valore del counter plain %d\n", value);
 
-   printf("Maxxxxxxxxxxxxx %d\n", max);
+
 
    do{
       /* Zeroed all variable  */
@@ -304,7 +299,7 @@ int bf_decoding_CT(DIGIT out[], const POSITION_T HtrPosOnes[N0][V], const POSITI
       }
       
       POSITION_T flip = argmax_avx2(sigma, N0*P);
-      if(iter == 0) printf("Posizione da flippare %lu\n", flip);
+      if(iter == 0 && flip == pos) printf("Posizione da flippare %lu\n", flip);
       int block    = flip / P;  // quale blocco di HTr
       int x        = flip % P;  // di quanto ruotare dentro quel blocco
       gf2x_toggle_coeff(out + block * NUM_DIGITS_GF2X_ELEMENT, x);
