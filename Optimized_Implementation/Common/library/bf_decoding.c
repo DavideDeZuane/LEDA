@@ -50,8 +50,7 @@ static inline POSITION_T shift(POSITION_T i, POSITION_T h){
 }
 
 
-void lift_mul_dense_to_sparse_CT(bs_operand_t bs_res[], const DIGIT dense[], const POSITION_T sparse[], unsigned int nPos)
-{
+void lift_mul_dense_to_sparse_CT(bs_operand_t bs_res[], const DIGIT dense[], const POSITION_T sparse[], unsigned int nPos){
    SLICE_TYPE tmp[NUM_SLICES_GF2X_ELEMENT];
    for(int i =0; i< nPos; i++) {
 #if (defined HIGH_PERFORMANCE_X86_64)
@@ -103,7 +102,7 @@ POSITION_T argmax_avx2(const uint8_t* arr, size_t len) {
     POSITION_T i = 0;
     __m256i max_vec = _mm256_setzero_si256();
     for (; i <= len - 32; i += 32) {
-        __m256i v = _mm256_load_si256((__m256i*)&arr[i]);
+        __m256i v = _mm256_loadu_si256((__m256i*)&arr[i]);
         max_vec = _mm256_max_epu8(max_vec, v);
     }
     
@@ -146,6 +145,42 @@ POSITION_T argmax_avx2(const uint8_t* arr, size_t len) {
     return -1;
 }
 
+void compute_counters(const bs_operand_t* bs, uint8_t* ctrs, int total_elements, int bitsliced_width) {
+   memset(ctrs, 0, total_elements * sizeof(uint8_t));
+
+   for (int j = 0; j < total_elements; j++) {
+       int block       = j / 256;  // quale blocco
+       int lane        = (j / 64) % 4; // quale lane
+       int bit_in_lane = j % 64; // quale posizione nella lane
+
+       for (int i = 0; i < bitsliced_width; i++) {
+           uint64_t lanes[4];
+           memcpy(lanes, &bs[block].slice[i], sizeof(lanes));
+           uint64_t bit = (lanes[lane] >> bit_in_lane) & 1ULL;
+           ctrs[j] += (uint8_t)(bit << i);
+       }
+   }
+}
+
+void compute_counters_be(const bs_operand_t* bs, uint8_t* ctrs, int total_elements, int bitsliced_width) {
+
+   memset(ctrs, 0, total_elements * sizeof(uint8_t));
+
+   for (int j = 0; j < total_elements; j++) {
+       int adjusted    = j + SLACK_SIZE;       // SLACK_SIZE = 61
+       int block       = adjusted / 256;
+       int lane        = (adjusted / 64) % 4;
+       int bit_in_lane = 63 - (adjusted % 64); // big-endian dentro il DIGIT
+
+       uint64_t lanes[4];
+       for (int i = 0; i < bitsliced_width; i++) {
+           memcpy(lanes, &bs[block].slice[i], sizeof(lanes));
+           uint64_t bit = (lanes[lane] >> bit_in_lane) & 1ULL;
+           ctrs[j] += (uint8_t)(bit << i);
+       }
+   }
+}
+
 /**
  * @brief BFmax decoder
  *    
@@ -169,31 +204,22 @@ int bf_decoding_CT(DIGIT out[], const POSITION_T HtrPosOnes[N0][V], const POSITI
    DIGIT update[NUM_DIGITS_GF2X_ELEMENT] = {0};
    int hw = population_count(privateSyndrome);
 
+   /* COMPUTING COUNTERS BITSLICED */
    bs_operand_t bs_unsatParityChecks[N0*NUM_SLICES_GF2X_ELEMENT];
    memset(bs_unsatParityChecks, 0, sizeof(bs_unsatParityChecks));
-   
    for (int i = 0; i < N0; i++) {
       lift_mul_dense_to_sparse_CT(bs_unsatParityChecks+(i*NUM_SLICES_GF2X_ELEMENT),
       privateSyndrome,
       HPosOnes[i],
       V);
    }
-
-
-   int value = 0;
-
-   for(int i=0; i<BITSLICED_OPERAND_WIDTH;i++){
-      uint8_t slice_slice = _mm256_extract_epi8(bs_unsatParityChecks[0].slice[i],0);
-      uint8_t bit =  slice_slice & 0x01;
-      value += bit << i;
-   }
-
+ 
+   /* FIND ARGMAX IN BITSLICED STRUCT */
    __m256i candidate[N0*NUM_SLICES_GF2X_ELEMENT] = {0};
+   // set that every position is a possible candidate
+   for(int z=0; z< N0*NUM_SLICES_GF2X_ELEMENT; z++) candidate[z] = _mm256_cmpeq_epi32(candidate[0], candidate[0]);
 
-   for(int z=0; z< N0*NUM_SLICES_GF2X_ELEMENT; z++){
-      candidate[z] = _mm256_cmpeq_epi32(candidate[0], candidate[0]);
-   }
-
+   /* SCAN BITSLICED COUNTER ARRAY FROM THE MSB TO THE LSB TO UPDATE THE CANDIDATE ARRAY */
    for(int i=BITSLICED_OPERAND_WIDTH-1; i >= 0; i--){
 
       uint32_t zero_ctr = 0;
@@ -215,6 +241,7 @@ int bf_decoding_CT(DIGIT out[], const POSITION_T HtrPosOnes[N0][V], const POSITI
 
    int pos = 0;
    uint8_t found = 0;
+   /* FROM THE CANDIDATE ARRAY FIND THE POSITION OF THE ARGMAX */
    for(int i =0; i < N0*NUM_SLICES_GF2X_ELEMENT; i++){
       
       if(_mm256_testz_si256(candidate[i], candidate[i])){
@@ -250,39 +277,73 @@ int bf_decoding_CT(DIGIT out[], const POSITION_T HtrPosOnes[N0][V], const POSITI
       }
    }
 
-   printf("Max value position: %u \n", pos);
    
-   printf("DIOPORCONE %lu \n",N0*P);
 
-
+   /* CHECK IF THE ARGMAX FOUND IS THE SAME WITH A SCHOOLBOOK APPROACH */
+   /*
    uint8_t ctrs[N0*P] = {0};
-
+   
    for(int j=0; j<N0*P; j++){
-
+      
       for(int i=0; i<BITSLICED_OPERAND_WIDTH;i++){
-         uint64_t slice_slice;
-         switch(j>>6){
-            case 0: slice_slice = _mm256_extract_epi64(bs_unsatParityChecks[j >> 8].slice[i],0); break;
-            case 1: slice_slice = _mm256_extract_epi64(bs_unsatParityChecks[j >> 8].slice[i],1); break;
-            case 2: slice_slice = _mm256_extract_epi64(bs_unsatParityChecks[j >> 8].slice[i],2); break;
-            case 3: slice_slice = _mm256_extract_epi64(bs_unsatParityChecks[j >> 8].slice[i],3); break;
-         }
-         uint64_t bit =  slice_slice & (1 << (j%64));
-         bit =  bit >> ((j%64));
-         ctrs[j] += bit << i;
+         
+
+      uint64_t slice_slice;
+        switch(j>>6){
+         case 0: slice_slice = _mm256_extract_epi64(bs_unsatParityChecks[j >> 8].slice[i],0); break;
+         case 1: slice_slice = _mm256_extract_epi64(bs_unsatParityChecks[j >> 8].slice[i],1); break;
+         case 2: slice_slice = _mm256_extract_epi64(bs_unsatParityChecks[j >> 8].slice[i],2); break;
+         case 3: slice_slice = _mm256_extract_epi64(bs_unsatParityChecks[j >> 8].slice[i],3); break;
+      }
+      uint64_t bit =  slice_slice & (1 << (j%64));
+      bit =  bit >> ((j%64));
+      ctrs[j] += bit << i;
+   }
+}
+*/
+
+   uint8_t ctrs[N0 * P];
+   compute_counters_be(bs_unsatParityChecks, ctrs, N0 * P, BITSLICED_OPERAND_WIDTH);
+
+   int max = 0;
+   for (int i = 0; i < N0 * P; i++) {
+      if (ctrs[i] > ctrs[max]) max = i;
+   }
+
+
+
+   
+   for(int i=0; i<N0; i++){
+      
+      POSITION_T offset = i * P;
+      memcpy(h, HTr[i], DIGIT_SIZE_B * NUM_DIGITS_GF2X_ELEMENT);
+
+      for(int j=0; j < P; j++){
+            // in teoria la riscrivo tutta quindi non c'è bisogno 
+         gf2x_and(tmp, h, privateSyndrome);
+         sigma[j + offset] = population_count(tmp);
+         gf2x_mod_mul_monom(h,  1, h);
       }
    }
+      
+   POSITION_T flip_pos = argmax_avx2(sigma, N0*P);
 
-   POSITION_T flip_pos = argmax_avx2(ctrs, N0*P);
-   printf("position max %d\n", flip_pos);
-   
-   int max = 0;
-   for(int i=0; i<N0*P; i++){
-      if(ctrs[i]>max) max = ctrs[i];
+   int flip_pos_2 = 0;
+   for(int i = 0; i < N0*P; i++){
+       if(sigma[i] > sigma[flip_pos_2]) flip_pos_2 = i;
    }
 
-   printf("Maxxxxxxxxxxxxx %d\n", max);
+   printf("--------------------------------------\n");
+   printf("ARGMAX position founded : \n");
+   printf("\t ARGMAX from bitsliced:  \t %d \n", pos);
+   printf("\t ARGMAX from extraction: \t %d \n", max);
+   printf("\t ARGMAX from schoolbook avx:\t %d \n", flip_pos);
+   printf("\t ARGMAX from schoolbook: \t %d \n", flip_pos_2);
+   printf("--------------------------------------\n");
 
+
+
+   
    do{
       /* Zeroed all variable  */
       //memset(sigma, 0, N0*P*sizeof(uint8_t));
@@ -304,7 +365,6 @@ int bf_decoding_CT(DIGIT out[], const POSITION_T HtrPosOnes[N0][V], const POSITI
       }
       
       POSITION_T flip = argmax_avx2(sigma, N0*P);
-      if(iter == 0) printf("Posizione da flippare %lu\n", flip);
       int block    = flip / P;  // quale blocco di HTr
       int x        = flip % P;  // di quanto ruotare dentro quel blocco
       gf2x_toggle_coeff(out + block * NUM_DIGITS_GF2X_ELEMENT, x);
@@ -314,13 +374,6 @@ int bf_decoding_CT(DIGIT out[], const POSITION_T HtrPosOnes[N0][V], const POSITI
       hw = population_count(privateSyndrome);
       iter++;
    } while( (iter < 2*NUM_ERRORS_T) && (hw != 0) );
-
-   /*
-   int err_weight = 0;
-   for (int i =0 ; i < N0; i++) {
-      err_weight += population_count(out+(NUM_DIGITS_GF2X_ELEMENT*i));
-   }
-   */
 
    /* Check the solution of the decoder */
    int check = 0;
