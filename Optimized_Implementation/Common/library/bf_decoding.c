@@ -200,11 +200,12 @@ void compute_counters_sliced(const bs_operand_t* bs, uint8_t* ctrs, int total_el
 
 static inline int argmax_bitsliced(const bs_operand_t* bs, int n_slices_total) {
     
+   // compute mask ok all 1 to found the max
    __m256i candidate[n_slices_total];
-   for(int z = 0; z < n_slices_total; z++)
-       candidate[z] = _mm256_cmpeq_epi32(candidate[z], candidate[z]);
+   // most efficent way to set all register to 1
+   for(int z = 0; z < n_slices_total; z++) candidate[z] = _mm256_cmpeq_epi32(candidate[z], candidate[z]);
 
-   /* FASE 1: scan MSB→LSB per trovare il valore massimo */
+   /* FASE 1: scan MSB→LSB to select bits  */
    for(int i = BITSLICED_OPERAND_WIDTH-1; i >= 0; i--){
        uint32_t zero_ctr = 0;
        uint32_t nonzero_blocks = 0;
@@ -318,7 +319,7 @@ int bf_decoding_CT(DIGIT out[], const POSITION_T HtrPosOnes[N0][V], const POSITI
    }
    /* In this way we can update the counter as a xor between syndrome and h_i*/
 
-   uint8_t sigma[N0*P] __attribute__((aligned(32)));
+   //uint8_t sigma[N0*P] __attribute__((aligned(32)));
    int iter = 0;
 
    DIGIT update[NUM_DIGITS_GF2X_ELEMENT] = {0};
@@ -327,7 +328,7 @@ int bf_decoding_CT(DIGIT out[], const POSITION_T HtrPosOnes[N0][V], const POSITI
 
    do{
       /* Zeroed all variable  */
-      memset(sigma, 0, N0*P*sizeof(uint8_t));
+      //memset(sigma, 0, N0*P*sizeof(uint8_t));
       memset(update, 0, DIGIT_SIZE_B*NUM_DIGITS_GF2X_ELEMENT);
 
 
@@ -342,7 +343,7 @@ int bf_decoding_CT(DIGIT out[], const POSITION_T HtrPosOnes[N0][V], const POSITI
       }
    
 
-      compute_counters_sliced(bs_unsatParityChecks, sigma, N0*P, BITSLICED_OPERAND_WIDTH);
+      //compute_counters_sliced(bs_unsatParityChecks, sigma, N0*P, BITSLICED_OPERAND_WIDTH);
 
 
       //compute_counters_be(bs_unsatParityChecks, sigma, N0 * P, BITSLICED_OPERAND_WIDTH);
@@ -353,7 +354,7 @@ int bf_decoding_CT(DIGIT out[], const POSITION_T HtrPosOnes[N0][V], const POSITI
       /* ---------------------------------- */
 
       /* FIND POSITION TO FLIP */
-      POSITION_T flip = argmax_bitsliced_impv(bs_unsatParityChecks, N0 * NUM_SLICES_GF2X_ELEMENT);
+      POSITION_T flip = argmax_bitsliced(bs_unsatParityChecks, N0 * NUM_SLICES_GF2X_ELEMENT);
       //POSITION_T flip = argmax_avx2(sigma, N0*P);
 
       //if(argmax_pos == flip) printf("Position match\n");
@@ -370,7 +371,7 @@ int bf_decoding_CT(DIGIT out[], const POSITION_T HtrPosOnes[N0][V], const POSITI
       /* ---------------------------------- */
 
       iter++;
-   } while( (iter < 2*NUM_ERRORS_T) && (hw != 0) );
+   } while( (iter < 1.5*NUM_ERRORS_T) && (hw != 0) );
 
    /* Check the solution of the decoder */
    int check = 0;
