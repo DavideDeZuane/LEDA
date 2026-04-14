@@ -218,7 +218,7 @@ static inline int argmax_bitsliced(const bs_operand_t* bs, int n_slices_total) {
        }
 
        if(zero_ctr != N0*NUM_SLICES_GF2X_ELEMENT){
-           for(int z = 0; z < n_slices_total; z++)
+           for(int z = 0; z < N0*NUM_SLICES_GF2X_ELEMENT; z++)
                candidate[z] = _mm256_and_si256(candidate[z], bs[z].slice[i]);
       }
       if(nonzero_blocks == 1) break;
@@ -254,12 +254,12 @@ static inline int argmax_bitsliced(const bs_operand_t* bs, int n_slices_total) {
 static inline int argmax_bitsliced_impv(const bs_operand_t* bs, int n_slices_total) {
 
     //__m256i *candidate = aligned_alloc(32, N0*NUM_SLICES_GF2X_ELEMENT * sizeof(__m256i));
-   __m256i candidate[n_slices_total] __attribute__((aligned(32)));
+   __m256i candidate[N0*NUM_SLICES_GF2X_ELEMENT] __attribute__((aligned(32)));
    for(int z = 0; z < N0*NUM_SLICES_GF2X_ELEMENT; z++)
        candidate[z] = _mm256_cmpeq_epi32(candidate[z], candidate[z]);
 
    /* phase 1: scan MSB→LSB with early exit */
-   int active_blocks = n_slices_total;
+   int active_blocks = N0*NUM_SLICES_GF2X_ELEMENT;
    for(int i = BITSLICED_OPERAND_WIDTH-1; i >= 0; i--){
         __m256i new_cand[N0*NUM_SLICES_GF2X_ELEMENT] __attribute__((aligned(32)));     
        uint32_t any_set = 0;
