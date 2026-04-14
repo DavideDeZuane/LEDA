@@ -1,6 +1,8 @@
 
 ## Sottrazione Condizionale
 
+
+
 ### Step 2 — la negazione unaria `-(…)`
 ```
 -(0) = 0x0000000000000000   → nessuna correzione necessaria
