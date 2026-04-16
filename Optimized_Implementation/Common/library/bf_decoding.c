@@ -213,6 +213,7 @@ static inline int argmax_bitsliced(const bs_operand_t* bs, int n_slices_total) {
 
        for(int z = 0; z < N0*NUM_SLICES_GF2X_ELEMENT; z++){
          int is_zero = _mm256_testz_si256(candidate[z], candidate[z]);
+         // controllo quali bit di candidate hanno un elemento in comune con bitsliced 
          zero_ctr += _mm256_testz_si256(candidate[z], bs[z].slice[i]);
          nonzero_blocks += !is_zero;
        }
@@ -318,7 +319,7 @@ int bf_decoding_CT(DIGIT out[], const POSITION_T HtrPosOnes[N0][V], const POSITI
    /* Densify h_0, h_1, ..., h_n0-1 */
     DIGIT HTr[N0][NUM_DIGITS_GF2X_ELEMENT] = {{0}};
     for(int i=0; i<N0; i++) {
-        gf2x_mod_densify_CT(HTr[i],HtrPosOnes[i],V);
+        gf2x_mod_densify_VT(HTr[i],HtrPosOnes[i],V);
     }
     /* In this way we can update the counter as a xor between syndrome and h_i*/
 

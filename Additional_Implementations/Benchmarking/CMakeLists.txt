@@ -212,7 +212,7 @@ foreach(cipher KEM-CPA)
               COMPILE_FLAGS "-DCONSTANT_TIME=1 -DN0=${nzero} -DCATEGORY=${sl} -DDFR_SL_LEVEL=1 ${KECCAK_EXTERNAL_ENABLE}")
             else()
               set_property(TARGET ${TARGET_BINARY_NAME} APPEND PROPERTY
-              COMPILE_FLAGS "-DCONSTANT_TIME=1 -DN0=${nzero} -DCATEGORY=${sl} -DDFR_SL_LEVEL=0 ${KECCAK_EXTERNAL_ENABLE}")
+        	COMPILE_FLAGS "-DCONSTANT_TIME=0 -DN0=${nzero} -DCATEGORY=${sl} -DDFR_SL_LEVEL=0 ${KECCAK_EXTERNAL_ENABLE}")
             endif()
           endforeach(dfrlev)
        endif()
