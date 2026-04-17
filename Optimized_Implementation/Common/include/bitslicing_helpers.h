@@ -70,6 +70,25 @@ bs_operand_t bitslice_inc(bs_operand_t a, SLICE_TYPE b)
    return result;
 }
 
+// function for update counters 
+static inline
+bs_operand_t bitslice_dec(bs_operand_t a, SLICE_TYPE b)
+{
+   bs_operand_t result;
+   SLICE_TYPE carry;
+   bitslice_half_adder(~a.slice[0],b,&(result.slice[0]),&carry);
+   result.slice[0] = ~result.slice[0];
+   for(int i = 1; i<BITSLICED_OPERAND_WIDTH; i++) {
+      bitslice_half_adder(~a.slice[i],
+                          carry,
+                          &(result.slice[i]),
+                          &carry);
+
+      result.slice[i] = ~result.slice[i];
+   }
+   return result;
+}
+
 static inline
 bs_operand_t slice_constant(uint16_t constant)
 {
