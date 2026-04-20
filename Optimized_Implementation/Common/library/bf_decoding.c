@@ -15,6 +15,9 @@
 #define ROUND_UP(amount, round_amt) ( ((amount+round_amt-1)/round_amt)*round_amt )
 #define SIGMA_LEN ((N0*P + 31) & ~31) 
 
+#define DELTA_LAYERS 3  // 3 bit per rappresentare [0..6]
+
+
 static inline
 void gf2x_toggle_coeff(DIGIT poly[], const unsigned int exponent)
 {
@@ -192,6 +195,15 @@ void compute_counters_sliced(const bs_operand_t* bs, uint8_t* ctrs, int total_el
   }
 }
 
+static inline void update_counters_bitsliced(
+    bs_operand_t   bs_unsatParityChecks[N0*NUM_SLICES_GF2X_ELEMENT],
+    const POSITION_T H[N0][V],
+    const DIGIT    syndrome[],
+    POSITION_T     pos_flip
+) {
+    
+}
+
 static inline void update_counters_after_flip(uint8_t *sigma, const POSITION_T H[N0][V], POSITION_T pos_flip, DIGIT* syndrome) 
 {
     int b = pos_flip >= P ? 1 : 0;
@@ -225,7 +237,6 @@ static inline void update_counters_after_flip(uint8_t *sigma, const POSITION_T H
         }
     }
 }
-
 
 
 static inline int argmax_bitsliced(const bs_operand_t* bs, int n_slices_total) {
@@ -390,10 +401,10 @@ int bf_decoding_CT(DIGIT out[], const POSITION_T HtrPosOnes[N0][V], const POSITI
       /* SCHOOLBOOK APPROACH FOR COMPUTING COUNTERS*/
       //compute_counters_sliced(bs_unsatParityChecks, sigma, N0*P, BITSLICED_OPERAND_WIDTH);
       POSITION_T flip = argmax_avx2(sigma, N0*P);
+      //POSITION_T flip = argmax_bitsliced_impv(bs_unsatParityChecks, N0 * NUM_SLICES_GF2X_ELEMENT);
       /* ---------------------------------- */
 
       /* FIND POSITION TO FLIP */
-      //POSITION_T flip = argmax_bitsliced_impv(bs_unsatParityChecks, N0 * NUM_SLICES_GF2X_ELEMENT);
 
       int block    = flip / P;  // quale blocco di HTr
       int x        = flip % P;  // di quanto ruotare dentro quel blocco
@@ -405,6 +416,7 @@ int bf_decoding_CT(DIGIT out[], const POSITION_T HtrPosOnes[N0][V], const POSITI
       gf2x_mod_mul_monom(update, x == 0 ? 0 :  x, HTr[block]);
       gf2x_xor(privateSyndrome, update, privateSyndrome);
       update_counters_after_flip(sigma, HtrPosOnes, flip, privateSyndrome);
+      //update_counters_bitsliced(bs_unsatParityChecks, HtrPosOnes, privateSyndrome, flip);
       hw = population_count(privateSyndrome);
       /* ---------------------------------- */
 
