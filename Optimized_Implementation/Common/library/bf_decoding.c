@@ -196,11 +196,68 @@ void compute_counters_sliced(const bs_operand_t* bs, uint8_t* ctrs, int total_el
 }
 
 static inline void update_counters_bitsliced(
-    bs_operand_t   bs_unsatParityChecks[N0*NUM_SLICES_GF2X_ELEMENT],
-    const POSITION_T H[N0][V],
-    const DIGIT    syndrome[],
-    POSITION_T     pos_flip
+    bs_operand_t     bs_unsatParityChecks[N0*NUM_SLICES_GF2X_ELEMENT],
+    const POSITION_T HtrPosOnes[N0][V],
+    const DIGIT      H_dense[N0][NUM_DIGITS_GF2X_ELEMENT],
+    const DIGIT      syndrome[],
+    POSITION_T       pos_flip
 ) {
+  
+        #define N_REGS ((V + 7) / 8)
+    
+        int b = pos_flip >= P ? 1 : 0;
+        POSITION_T local_pos = pos_flip - b * P;
+    
+        __m256i vp    = _mm256_set1_epi32((uint32_t)P);
+        __m256i vpos  = _mm256_set1_epi32((uint32_t)local_pos);
+    
+        // pre-carica HtrPosOnes[b] nei registri
+        __m256i htr_regs[N_REGS];
+        for (int r = 0; r < N_REGS; r++) {
+            uint32_t tmp[8] = {0};
+            for (int i = 0; i < 8 && r*8+i < V; i++)
+                tmp[i] = HtrPosOnes[b][r*8+i];
+            htr_regs[r] = _mm256_loadu_si256((__m256i *)tmp);
+        }
+    
+        // calcola tutti i row_index in parallelo
+        POSITION_T row_indices[V];
+        for (int r = 0; r < N_REGS; r++) {
+            __m256i sum = _mm256_add_epi32(htr_regs[r], vpos);
+            __m256i sub = _mm256_sub_epi32(sum, vp);
+            __m256i msk = _mm256_cmpgt_epi32(vp, sum);
+            __m256i res = _mm256_blendv_epi8(sub, sum, msk);
+    
+            uint32_t tmp[8];
+            _mm256_storeu_si256((__m256i *)tmp, res);
+            for (int i = 0; i < 8 && r*8+i < V; i++)
+                row_indices[r*8+i] = tmp[i];
+        }
+    
+        // leggi i segni dalla sindrome per tutti i row_index
+        int ds[V];
+        for (int i = 0; i < V; i++)
+            ds[i] = gf2x_get_coeff(syndrome, row_indices[i]) ? 1 : -1;
+    
+        // aggiorna i counter: separa inc e dec per minimizzare le chiamate
+        SLICE_TYPE tmp_slice[NUM_SLICES_GF2X_ELEMENT];
+    
+        for (int b2 = 0; b2 < N0; b2++) {
+            bs_operand_t *bs_block = bs_unsatParityChecks + b2 * NUM_SLICES_GF2X_ELEMENT;
+    
+            for (int i = 0; i < V; i++) {
+                gf2x_mod_mul_monom((DIGIT *)tmp_slice, row_indices[i], H_dense[b2]);
+    
+                if (ds[i] == 1) {
+                    for (int j = 0; j < NUM_SLICES_GF2X_ELEMENT; j++)
+                        bs_block[j] = bitslice_inc(bs_block[j], tmp_slice[j]);
+                } else {
+                    for (int j = 0; j < NUM_SLICES_GF2X_ELEMENT; j++)
+                        bs_block[j] = bitslice_dec(bs_block[j], tmp_slice[j]);
+                }
+            }
+        }
+    
     
 }
 
@@ -362,6 +419,10 @@ int bf_decoding_CT(DIGIT out[], const POSITION_T HtrPosOnes[N0][V], const POSITI
     for(int i=0; i<N0; i++) {
         gf2x_mod_densify_VT(HTr[i],HtrPosOnes[i],V);
     }
+
+    DIGIT H_dense[N0][NUM_DIGITS_GF2X_ELEMENT] = {{0}};
+    for(int i = 0; i < N0; i++)
+        gf2x_mod_densify_VT(H_dense[i], HPosOnes[i], V);
     /* In this way we can update the counter as a xor between syndrome and h_i*/
 
     int iter = 0;
@@ -379,7 +440,7 @@ int bf_decoding_CT(DIGIT out[], const POSITION_T HtrPosOnes[N0][V], const POSITI
 
     uint8_t sigma[N0*P] __attribute__((aligned(32)));
     memset(sigma, 0, N0*P*sizeof(uint8_t));
-    compute_counters_sliced(bs_unsatParityChecks, sigma, N0*P, BITSLICED_OPERAND_WIDTH);
+    //compute_counters_sliced(bs_unsatParityChecks, sigma, N0*P, BITSLICED_OPERAND_WIDTH);
       
    do{
       //memset(sigma, 0, N0*P*sizeof(uint8_t));
@@ -400,8 +461,8 @@ int bf_decoding_CT(DIGIT out[], const POSITION_T HtrPosOnes[N0][V], const POSITI
 
       /* SCHOOLBOOK APPROACH FOR COMPUTING COUNTERS*/
       //compute_counters_sliced(bs_unsatParityChecks, sigma, N0*P, BITSLICED_OPERAND_WIDTH);
-      POSITION_T flip = argmax_avx2(sigma, N0*P);
-      //POSITION_T flip = argmax_bitsliced_impv(bs_unsatParityChecks, N0 * NUM_SLICES_GF2X_ELEMENT);
+      //POSITION_T flip = argmax_avx2(sigma, N0*P);
+      POSITION_T flip = argmax_bitsliced_impv(bs_unsatParityChecks, N0 * NUM_SLICES_GF2X_ELEMENT);
       /* ---------------------------------- */
 
       /* FIND POSITION TO FLIP */
@@ -415,13 +476,14 @@ int bf_decoding_CT(DIGIT out[], const POSITION_T HtrPosOnes[N0][V], const POSITI
       /* SCHOOLBOOK UPDATE OF THE SYNDROME */
       gf2x_mod_mul_monom(update, x == 0 ? 0 :  x, HTr[block]);
       gf2x_xor(privateSyndrome, update, privateSyndrome);
-      update_counters_after_flip(sigma, HtrPosOnes, flip, privateSyndrome);
-      //update_counters_bitsliced(bs_unsatParityChecks, HtrPosOnes, privateSyndrome, flip);
+      //update_counters_after_flip(sigma, HtrPosOnes, flip, privateSyndrome);
+      update_counters_bitsliced(bs_unsatParityChecks, HtrPosOnes, H_dense, privateSyndrome, flip);
       hw = population_count(privateSyndrome);
       /* ---------------------------------- */
 
       iter++;
    } while( (iter < 1.5*NUM_ERRORS_T) && (hw != 0) );
+
 
    /* Check the solution of the decoder */
    int check = 0;
