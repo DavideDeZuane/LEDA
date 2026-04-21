@@ -377,10 +377,11 @@ static inline void update_counters_after_flip(uint8_t *sigma, const POSITION_T H
     int b = pos_flip >= P ? 1 : 0;
     POSITION_T local_pos = pos_flip - b * P;
 
+
+    /* PARALLEL SHIFT FOR POSITIONS */
     __m256i vp   = _mm256_set1_epi32((uint32_t)P);
     __m256i vpos = _mm256_set1_epi32((uint32_t)local_pos);
 
-    // pre-carica H[b] e calcola row_indices in parallelo
     POSITION_T row_indices[V];
     for (int r = 0; r < N_REGS; r++) {
         uint32_t tmp[8] = {0};
@@ -395,8 +396,11 @@ static inline void update_counters_after_flip(uint8_t *sigma, const POSITION_T H
         for (int i = 0; i < 8 && r*8+i < V; i++)
             row_indices[r*8+i] = tmp[i];
     }
+    /* ------------------------------ */
 
-    // calcola ds
+    /* */
+
+    // calcola quanto pè la variazione del counter per ogni riga
     int ds[V];
     for (int i = 0; i < V; i++)
         ds[i] = gf2x_get_coeff(syndrome, row_indices[i]) ? 1 : -1;
@@ -413,6 +417,7 @@ static inline void update_counters_after_flip(uint8_t *sigma, const POSITION_T H
     }
 
     // aggiorna i counter
+    // riscrivere questa parte si potrebbe fare molto più veloce sfruttando HPosOnes
     for (int i = 0; i < V; i++) {
         __m256i vrow = _mm256_set1_epi32((uint32_t)row_indices[i]);
         int d = ds[i];
@@ -566,9 +571,9 @@ int bf_decoding_CT(DIGIT out[], const POSITION_T HtrPosOnes[N0][V], const POSITI
     }
 
     DIGIT H_dense[N0][NUM_DIGITS_GF2X_ELEMENT] = {{0}};
-    for(int i = 0; i < N0; i++)
-        gf2x_mod_densify_VT(H_dense[i], HPosOnes[i], V);
-    /* In this way we can update the counter as a xor between syndrome and h_i*/
+    for(int i=0; i<N0; i++) {
+        gf2x_mod_densify_VT(H_dense[i],HPosOnes[i],V);
+    }
 
     int iter = 0;
     int hw = population_count(privateSyndrome);
@@ -618,11 +623,11 @@ int bf_decoding_CT(DIGIT out[], const POSITION_T HtrPosOnes[N0][V], const POSITI
       gf2x_toggle_coeff(out + block * NUM_DIGITS_GF2X_ELEMENT, x);
       /* ---------------------------------- */
 
-      /* SCHOOLBOOK UPDATE OF THE SYNDROME */
+          /* SCHOOLBOOK UPDATE OF THE SYNDROME */
       gf2x_mod_mul_monom(update, x == 0 ? 0 :  x, HTr[block]);
       gf2x_xor(privateSyndrome, update, privateSyndrome);
-      update_counters_after_flip(sigma, HtrPosOnes, flip, privateSyndrome);
-     // update_counters_bitsliced(bs_unsatParityChecks, HtrPosOnes, H_dense, privateSyndrome, flip);
+          update_counters_after_flip(sigma, HtrPosOnes, flip, privateSyndrome);
+      //update_counters_bitsliced(bs_unsatParityChecks, HtrPosOnes, H_dense, privateSyndrome, flip);
       hw = population_count(privateSyndrome);
       /* ---------------------------------- */
 

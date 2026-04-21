@@ -464,7 +464,7 @@ void rand_error_pos_shake(POSITION_T errorPos[NUM_ERRORS_T],
    int duplicated, counter = 0;
 
    while (counter < NUM_ERRORS_T) {
-      int p = rand_range_shake(N0*NUM_BITS_GF2X_ELEMENT,BITS_TO_REPRESENT(P),
+      int p = rand_range_shake(N0*P,BITS_TO_REPRESENT(N0*P),
                                state);
       duplicated = 0;
       for (int j = 0; j < counter; j++) {

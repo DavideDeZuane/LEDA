@@ -1,4 +1,26 @@
 
+## Benchmark 
+
+sudo apt install linux-perf
+sudo sysctl -w kernel.perf_event_paranoid=1
+sudo taskset -c 0 perf record -F max --call-graph fp ####
+sudo hotspot perf.data
+
+sudo apt install kcachegrind
+valgrind --tool=callgrind --callgrind-out-file=callgrind.data --dump-instr=yes ####
+kcachegrind callgrind.data
+
+
+set(CMAKE_C_FLAGS  "${CMAKE_C_FLAGS} -O2 -march=native")
+    set(CMAKE_C_FLAGS  "${CMAKE_C_FLAGS} -g3 -Wall -pedantic -Wuninitialized")
+    set(CMAKE_C_FLAGS  "${CMAKE_C_FLAGS} -DSKIP_INLINE=1 -fno-omit-frame-pointer -fno-inline -fno-optimize-sibling-calls")
+
+#if (SKIP_INLINE == 1)
+#define INLINE
+#else
+#define INLINE inline
+#endif
+
 ## Sottrazione Condizionale
 
 
