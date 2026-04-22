@@ -274,13 +274,18 @@ static inline void update_counters_bitsliced(
         POSITION_T update[V];
         
         for (int b2 = 0; b2 < N0; b2++) {
+            POSITION_T offset = b2*P;
             for(int i = 0; i <V; i++){
                 shift_positions(HPosOnes[b2], update, V, row_indices[i]);
                 int d = ds[i];
                 for(int j=0; j < V; j++){
-                    POSITION_T to_update = update[i];
+                    POSITION_T to_update = update[j];
                     switch(d){
                         case 1: 
+                            // tocca cambaire il toggle coeff perche' quello lavora a blocchi di 64 mentre su avx abbiamo blocchi da 256 
+                            // quindi tocca scrivere una funzione custom per fare queta cosa
+                            // le posizioni qui vanno aggiornate con l'offset del blocco che stiamo considerando
+                            // inoltre qua i controlli sono fatti male, vanno scritti meglio 
                             if(gf2x_get_coeff((DIGIT *)tmp_slice_1, to_update) ==1) gf2x_toggle_coeff((DIGIT *)tmp_slice_2, to_update);
                             else gf2x_toggle_coeff((DIGIT *)tmp_slice_1, to_update);
                             break;
@@ -338,69 +343,6 @@ static inline void update_counters_bitsliced(
     
 }
 
-
-static inline void update_counters_bitsliced_sparse(
-    bs_operand_t     bs_unsatParityChecks[N0*NUM_SLICES_GF2X_ELEMENT],
-    const POSITION_T HtrPosOnes[N0][V],
-    const POSITION_T HPosOnes[N0][V],
-    const DIGIT      syndrome[],
-    POSITION_T       pos_flip
-) {
-    
-        int b = pos_flip >= P ? 1 : 0;
-        POSITION_T local_pos = pos_flip - b * P;
-    
-        POSITION_T row_indices[V];
-        shift_positions(HtrPosOnes[b], row_indices, V, local_pos);
-
-    
-        int ds[V];
-        for (int i = 0; i < V; i++) {
-            int straightIdx = (NUM_DIGITS_GF2X_ELEMENT * DIGIT_SIZE_b - 1) - row_indices[i];
-            DIGIT bit       = (syndrome[straightIdx / DIGIT_SIZE_b] >>
-                              (DIGIT_SIZE_b - 1 - straightIdx % DIGIT_SIZE_b)) & 1;
-            ds[i]           = (int)(2 * bit) - 1;
-        }
-    
-
-        for (int i = 0; i < V; i++) {
-            POSITION_T row_index = row_indices[i];
-            int d = ds[i];
-    
-            for (int b2 = 0; b2 < N0; b2++) {
-                POSITION_T cols[V];
-                shift_positions(HPosOnes[b2], cols, V, row_index);
-    
-                __m256i mask[NUM_SLICES_GF2X_ELEMENT];
-                for (int j = 0; j < NUM_SLICES_GF2X_ELEMENT; j++)
-                    mask[j] = _mm256_setzero_si256();
-    
-                for (int j = 0; j < V; j++) {
-                    int poly_idx    = (P - 1) - (int)cols[j];
-                    int adjusted    = poly_idx + SLACK_SIZE;
-                    int chunk       = b2 * NUM_SLICES_GF2X_ELEMENT
-                                    + adjusted / NUM_BITS_IN_BITSLICED_OP;
-                    int lane        = (adjusted / 64) % 4;
-                    int bit_in_lane = 63 - (adjusted % 64);
-                    ((uint64_t *)&mask[chunk - b2*NUM_SLICES_GF2X_ELEMENT])[lane] 
-                        |= (1ULL << bit_in_lane);
-                }
-    
-                // applica per questo row_index separatamente
-                bs_operand_t *bs_block = bs_unsatParityChecks + b2 * NUM_SLICES_GF2X_ELEMENT;
-                if (d == 1) {
-                    for (int j = 0; j < NUM_SLICES_GF2X_ELEMENT; j++)
-                        if (!_mm256_testz_si256(mask[j], mask[j]))
-                            bs_block[j] = bitslice_inc(bs_block[j], mask[j]);
-                } else {
-                    for (int j = 0; j < NUM_SLICES_GF2X_ELEMENT; j++)
-                        if (!_mm256_testz_si256(mask[j], mask[j]))
-                            bs_block[j] = bitslice_dec(bs_block[j], mask[j]);
-                }
-            }
-        }
-    
-}
 
 static inline void update_counters_after_flip(uint8_t *sigma, const POSITION_T HtrPosOnes[N0][V], const POSITION_T  HPosOnes[N0][V], POSITION_T pos_flip, DIGIT* syndrome){
 
