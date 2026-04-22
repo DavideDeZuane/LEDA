@@ -165,8 +165,7 @@ static inline void compute_counters_plain(uint8_t* sigma, DIGIT H[N0][NUM_DIGITS
       }
 }
 
-void compute_counters_sliced(const bs_operand_t* bs, uint8_t* ctrs, int total_elements, int bitsliced_width) 
-{
+void compute_counters_sliced(const bs_operand_t* bs, uint8_t* ctrs, int total_elements, int bitsliced_width) {
    memset(ctrs, 0, total_elements * sizeof(uint8_t));
 
    for (int i = 0; i < N0; i++) {
@@ -370,79 +369,95 @@ static inline void update_counters_bitsliced_impv(
     #undef N_REGS
 }
 
-static inline void update_counters_after_flip(uint8_t *sigma, const POSITION_T H[N0][V], POSITION_T pos_flip, DIGIT* syndrome) 
-{
+static inline void update_counters_after_flip(uint8_t *sigma, const POSITION_T HtrPosOnes[N0][V], const POSITION_T  HPosOnes[N0][V], POSITION_T pos_flip, DIGIT* syndrome){
     #define N_REGS ((V + 7) / 8)
 
     int b = pos_flip >= P ? 1 : 0;
     POSITION_T local_pos = pos_flip - b * P;
 
-
-    /* PARALLEL SHIFT FOR POSITIONS */
     __m256i vp   = _mm256_set1_epi32((uint32_t)P);
     __m256i vpos = _mm256_set1_epi32((uint32_t)local_pos);
 
-    POSITION_T row_indices[V];
+    // pre-carica HPosOnes[b2] nei registri AVX2 una volta sola
+    __m256i h2_regs[N0][N_REGS];
+    for (int b2 = 0; b2 < N0; b2++) {
+        for (int r = 0; r < N_REGS; r++) {
+            uint32_t tmp[8] = {0};
+            for (int j = 0; j < 8 && r*8+j < V; j++)
+                tmp[j] = HPosOnes[b2][r*8+j];
+            h2_regs[b2][r] = _mm256_loadu_si256((__m256i *)tmp);
+        }
+    }
+
+    // calcola row_indices, ds e aggiorna counter in un unico loop
     for (int r = 0; r < N_REGS; r++) {
         uint32_t tmp[8] = {0};
         for (int i = 0; i < 8 && r*8+i < V; i++)
-            tmp[i] = H[b][r*8+i];
+            tmp[i] = HtrPosOnes[b][r*8+i];
         __m256i htr = _mm256_loadu_si256((__m256i *)tmp);
         __m256i sum = _mm256_add_epi32(htr, vpos);
         __m256i sub = _mm256_sub_epi32(sum, vp);
         __m256i msk = _mm256_cmpgt_epi32(vp, sum);
         __m256i res = _mm256_blendv_epi8(sub, sum, msk);
         _mm256_storeu_si256((__m256i *)tmp, res);
-        for (int i = 0; i < 8 && r*8+i < V; i++)
-            row_indices[r*8+i] = tmp[i];
-    }
-    /* ------------------------------ */
 
-    /* */
+        for (int i = 0; i < 8 && r*8+i < V; i++) {
+            POSITION_T row_index = tmp[i];
+
+            // ds branch-free
+            int straightIdx = (NUM_DIGITS_GF2X_ELEMENT * DIGIT_SIZE_b - 1) - row_index;
+            DIGIT bit       = (syndrome[straightIdx / DIGIT_SIZE_b] >>
+                              (DIGIT_SIZE_b - 1 - straightIdx % DIGIT_SIZE_b)) & 1;
+            int d           = (int)(2 * bit) - 1;
+
+            __m256i vrow = _mm256_set1_epi32((uint32_t)row_index);
+
+            for (int b2 = 0; b2 < N0; b2++) {
+                POSITION_T offset = b2 * P;
+
+                for (int r2 = 0; r2 < N_REGS; r2++) {
+                    // col = (HPosOnes[b2][j] + row_index) % P
+                    __m256i col = _mm256_add_epi32(h2_regs[b2][r2], vrow);
+                    __m256i s   = _mm256_sub_epi32(col, vp);
+                    __m256i m   = _mm256_cmpgt_epi32(vp, col);
+                    col = _mm256_blendv_epi8(s, col, m);
+
+                    uint32_t cols[8];
+                    _mm256_storeu_si256((__m256i *)cols, col);
+
+                    for (int j = 0; j < 8 && r2*8+j < V; j++)
+                        sigma[offset + cols[j]] += d;
+                }
+            }
+        }
+    }
+
+    #undef N_REGS
+    /*
 
     // calcola quanto pè la variazione del counter per ogni riga
     int ds[V];
     for (int i = 0; i < V; i++)
         ds[i] = gf2x_get_coeff(syndrome, row_indices[i]) ? 1 : -1;
 
-    // pre-carica H[b2] nei registri AVX2
-    __m256i h2_regs[N0][N_REGS];
+   // aggiorna i counter usando HPosOnes
+   for (int i = 0; i < V; i++) {
+    POSITION_T row_index = row_indices[i];
+    int d = ds[i];
+
     for (int b2 = 0; b2 < N0; b2++) {
-        for (int r = 0; r < N_REGS; r++) {
-            uint32_t tmp[8] = {0};
-            for (int j = 0; j < 8 && r*8+j < V; j++)
-                tmp[j] = H[b2][r*8+j];
-            h2_regs[b2][r] = _mm256_loadu_si256((__m256i *)tmp);
+        POSITION_T offset = b2 * P;
+        for (int j = 0; j < V; j++) {
+            POSITION_T ell = row_index + HPosOnes[b2][j] ;
+            if (ell >= P) ell -= P;
+            sigma[offset + ell] += d;
         }
     }
-
-    // aggiorna i counter
-    // riscrivere questa parte si potrebbe fare molto più veloce sfruttando HPosOnes
-    for (int i = 0; i < V; i++) {
-        __m256i vrow = _mm256_set1_epi32((uint32_t)row_indices[i]);
-        int d = ds[i];
-
-        for (int b2 = 0; b2 < N0; b2++) {
-            POSITION_T offset = b2 * P;
-
-            for (int r = 0; r < N_REGS; r++) {
-                // ell = (row_index - H[b2][j] + P) % P
-                __m256i ell = _mm256_add_epi32(
-                                  _mm256_sub_epi32(vrow, h2_regs[b2][r]), vp);
-                __m256i sub = _mm256_sub_epi32(ell, vp);
-                __m256i msk = _mm256_cmpgt_epi32(vp, ell);
-                ell = _mm256_blendv_epi8(sub, ell, msk);
-
-                uint32_t ells[8];
-                _mm256_storeu_si256((__m256i *)ells, ell);
-
-                for (int j = 0; j < 8 && r*8+j < V; j++)
-                    sigma[offset + ells[j]] += d;
-            }
-        }
-    }
+}
 
     #undef N_REGS
+    
+    */
 }
 
 
@@ -581,6 +596,7 @@ int bf_decoding_CT(DIGIT out[], const POSITION_T HtrPosOnes[N0][V], const POSITI
     bs_operand_t bs_unsatParityChecks[N0*NUM_SLICES_GF2X_ELEMENT];
     memset(bs_unsatParityChecks, 0, sizeof(bs_unsatParityChecks));
     
+    /* COMPUTE COUNTERS WITH BITSLICED STRUCTURE */
     for (int i = 0; i < N0; i++) {
          lift_mul_dense_to_sparse_CT(bs_unsatParityChecks+(i*NUM_SLICES_GF2X_ELEMENT),
         privateSyndrome,
@@ -590,48 +606,34 @@ int bf_decoding_CT(DIGIT out[], const POSITION_T HtrPosOnes[N0][V], const POSITI
 
     uint8_t sigma[N0*P] __attribute__((aligned(32)));
     memset(sigma, 0, N0*P*sizeof(uint8_t));
+    /* CONVERSION OF THE COUNTERS */
     compute_counters_sliced(bs_unsatParityChecks, sigma, N0*P, BITSLICED_OPERAND_WIDTH);
       
    do{
-      //memset(sigma, 0, N0*P*sizeof(uint8_t));
-      //memset(bs_unsatParityChecks, 0, sizeof(bs_unsatParityChecks));
-      memset(update, 0, DIGIT_SIZE_B*NUM_DIGITS_GF2X_ELEMENT);
-      
-      /* COMPUTING COUNTERS BITSLICED */
-      //for (int i = 0; i < N0; i++) {
-       //  lift_mul_dense_to_sparse_CT(bs_unsatParityChecks+(i*NUM_SLICES_GF2X_ELEMENT),
-         //   privateSyndrome,
-           // HPosOnes[i],
-            //V);
-      //}
-   
-      //compute_counters_sliced(bs_unsatParityChecks, sigma, N0*P, BITSLICED_OPERAND_WIDTH);
-      //compute_counters_be(bs_unsatParityChecks, sigma, N0 * P, BITSLICED_OPERAND_WIDTH);
-      /* In gf2x_and possiamo evitare di considerare l'endianess e farlo diretto tanto usano la stessa rappresentazione */
+        memset(update, 0, DIGIT_SIZE_B*NUM_DIGITS_GF2X_ELEMENT);
 
-      /* SCHOOLBOOK APPROACH FOR COMPUTING COUNTERS*/
-      //compute_counters_sliced(bs_unsatParityChecks, sigma, N0*P, BITSLICED_OPERAND_WIDTH);
-      POSITION_T flip = argmax_avx2(sigma, N0*P);
-      //POSITION_T flip = argmax_bitsliced_impv(bs_unsatParityChecks, N0 * NUM_SLICES_GF2X_ELEMENT);
-      /* ---------------------------------- */
+        /* APPROACH WITH COUNTER ARRAY UINT8 */
+        POSITION_T flip = argmax_avx2(sigma, N0*P);
+        /* APPROACH WITH COUNTER ARRAY BITSLICED */
+        //POSITION_T flip = argmax_bitsliced_impv(bs_unsatParityChecks, N0 * NUM_SLICES_GF2X_ELEMENT);
 
-      /* FIND POSITION TO FLIP */
+        /* FIND POSITION TO FLIP */
+        int block    = flip / P;  // quale blocco di HTr
+        int x        = flip % P;  // di quanto ruotare dentro quel blocco
+        // the position is in little endian so it's ok because the conversion is done by the function
+        gf2x_toggle_coeff(out + block * NUM_DIGITS_GF2X_ELEMENT, x);
 
-      int block    = flip / P;  // quale blocco di HTr
-      int x        = flip % P;  // di quanto ruotare dentro quel blocco
-      // the position is in little endian so it's ok because the conversion is done by the function
-      gf2x_toggle_coeff(out + block * NUM_DIGITS_GF2X_ELEMENT, x);
-      /* ---------------------------------- */
+        /* SCHOOLBOOK UPDATE OF THE SYNDROME */
+        gf2x_mod_mul_monom(update, x == 0 ? 0 :  x, HTr[block]);
+        gf2x_xor(privateSyndrome, update, privateSyndrome);
+        /* COUNTERS UPDATE  */
+        /* APPROACH WITH COUNTER ARRAY UINT8 */
+        update_counters_after_flip(sigma, HtrPosOnes, HPosOnes, flip, privateSyndrome);
+        /* APPROACH WITH COUNTER ARRAY BITSLICED */
+        //update_counters_bitsliced(bs_unsatParityChecks, HtrPosOnes, H_dense, privateSyndrome, flip);
+        hw = population_count(privateSyndrome);
 
-          /* SCHOOLBOOK UPDATE OF THE SYNDROME */
-      gf2x_mod_mul_monom(update, x == 0 ? 0 :  x, HTr[block]);
-      gf2x_xor(privateSyndrome, update, privateSyndrome);
-          update_counters_after_flip(sigma, HtrPosOnes, flip, privateSyndrome);
-      //update_counters_bitsliced(bs_unsatParityChecks, HtrPosOnes, H_dense, privateSyndrome, flip);
-      hw = population_count(privateSyndrome);
-      /* ---------------------------------- */
-
-      iter++;
+        iter++;
    } while( (iter < 1.5*NUM_ERRORS_T) && (hw != 0) );
 
 
