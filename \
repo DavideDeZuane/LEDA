@@ -231,69 +231,99 @@ static inline void update_counters_bitsliced(
 ) {
   
 
-        int b = pos_flip >= P ? 1 : 0;
-        POSITION_T local_pos = pos_flip - b * P;
+    int b = pos_flip >= P ? 1 : 0;
+    POSITION_T local_pos = pos_flip - b * P;
 
-        POSITION_T row_indices[V];
+    __m256i vp   = _mm256_set1_epi32((uint32_t)P);
+    __m256i vpos = _mm256_set1_epi32((uint32_t)local_pos);
 
-        shift_positions(HtrPosOnes[b], row_indices, V, local_pos);
+    // calcola row_indices in parallelo
+    __m256i htr_regs[N_REGS];
+    for (int r = 0; r < N_REGS; r++) {
+        uint32_t tmp[8] = {0};
+        for (int i = 0; i < 8 && r*8+i < V; i++)
+            tmp[i] = HtrPosOnes[b][r*8+i];
+        htr_regs[r] = _mm256_loadu_si256((__m256i *)tmp);
+    }
 
-        // leggi i segni dalla sindrome per tutti i row_index
-        int ds[V];
-        for (int i = 0; i < V; i++)
-            ds[i] = gf2x_get_coeff(syndrome, row_indices[i]) ? 1 : -1;
-    
-        // aggiorna i counter: separa inc e dec per minimizzare le chiamate
-        SLICE_TYPE tmp_slice_2[N0*NUM_SLICES_GF2X_ELEMENT]; //piu 2
-        SLICE_TYPE tmp_slice_1[N0*NUM_SLICES_GF2X_ELEMENT]; //piu 1
-        SLICE_TYPE tmp_slice_m1[N0*NUM_SLICES_GF2X_ELEMENT]; //meno 1
-        SLICE_TYPE tmp_slice_m2[N0*NUM_SLICES_GF2X_ELEMENT]; //meno 2
+    POSITION_T row_indices[V];
+    for (int r = 0; r < N_REGS; r++) {
+        __m256i sum = _mm256_add_epi32(htr_regs[r], vpos);
+        __m256i sub = _mm256_sub_epi32(sum, vp);
+        __m256i msk = _mm256_cmpgt_epi32(vp, sum);
+        __m256i res = _mm256_blendv_epi8(sub, sum, msk);
+        uint32_t tmp[8];
+        _mm256_storeu_si256((__m256i *)tmp, res);
+        for (int i = 0; i < 8 && r*8+i < V; i++)
+            row_indices[r*8+i] = tmp[i];
+    }
 
-        POSITION_T update[V];
-        
-        for (int b2 = 0; b2 < N0; b2++) {
-            POSITION_T offset = b2*P;
-            for(int i = 0; i <V; i++){
-                shift_positions(HPosOnes[b2], update, V, row_indices[i]);
-                int d = ds[i];
-                for(int j=0; j < V; j++){
-                    POSITION_T to_update = update[j];
-                    switch(d){
-                        case 1: 
-                            // tocca cambaire il toggle coeff perche' quello lavora a blocchi di 64 mentre su avx abbiamo blocchi da 256 
-                            // quindi tocca scrivere una funzione custom per fare queta cosa
-                            // le posizioni qui vanno aggiornate con l'offset del blocco che stiamo considerando
-                            // inoltre qua i controlli sono fatti male, vanno scritti meglio 
-                            if(gf2x_get_coeff((DIGIT *)tmp_slice_1, to_update) ==1) gf2x_toggle_coeff((DIGIT *)tmp_slice_2, to_update);
-                            else gf2x_toggle_coeff((DIGIT *)tmp_slice_1, to_update);
-                            break;
-                        case 0: 
-                            if(gf2x_get_coeff((DIGIT *)tmp_slice_m1, to_update) ==1) gf2x_toggle_coeff((DIGIT *)tmp_slice_m2, to_update);
-                            else gf2x_toggle_coeff((DIGIT *)tmp_slice_m1, to_update);
-                            break;
+    // ds dalla sindrome
+    int ds[V];
+    for (int i = 0; i < V; i++)
+        ds[i] = gf2x_get_coeff(syndrome, row_indices[i]) ? 1 : -1;
 
-                        default:
-                        break;
+    // accumulatore delta: bs_operand_t per chunk
+    // delta in [-6, +6] quindi 4 bit sufficienti (1 segno + 3 valore)
+    // usiamo inc/dec sul bs_operand per accumulare
+    static bs_operand_t delta[N0*NUM_SLICES_GF2X_ELEMENT];
+    memset(delta, 0, sizeof(delta));
+
+    POSITION_T cols[V];
+    for (int b2 = 0; b2 < N0; b2++) {
+        for (int i = 0; i < V; i++) {
+            shift_positions(HPosOnes[b2], cols, V, row_indices[i]);
+            int d = ds[i];
+
+            for (int j = 0; j < V; j++) {
+                // mappatura col → (chunk, lane, bit_in_lane)
+                int poly_idx    = (P - 1) - (int)cols[j];
+                int adjusted    = poly_idx + SLACK_SIZE;
+                int chunk       = b2 * NUM_SLICES_GF2X_ELEMENT
+                                + adjusted / NUM_BITS_IN_BITSLICED_OP;
+                int lane        = (adjusted / 64) % 4;
+                int bit_in_lane = 63 - (adjusted % 64);
+
+                __m256i mask = _mm256_setzero_si256();
+                ((uint64_t *)&mask)[lane] = (1ULL << bit_in_lane);
+
+                // accumula delta con ripple carry/borrow
+                if (d == 1) {
+                    __m256i carry = mask;
+                    for (int l = 0; l < 4; l++) {
+                        __m256i nc = _mm256_and_si256(delta[chunk].slice[l], carry);
+                        delta[chunk].slice[l] = _mm256_xor_si256(delta[chunk].slice[l], carry);
+                        carry = nc;
+                        if (_mm256_testz_si256(carry, carry)) break;
                     }
-
+                } else {
+                    __m256i borrow = mask;
+                    for (int l = 0; l < BITSLICED_OPERAND_WIDTH; l++) {
+                        __m256i nb = _mm256_andnot_si256(delta[chunk].slice[l], borrow);
+                        delta[chunk].slice[l] = _mm256_xor_si256(delta[chunk].slice[l], borrow);
+                        borrow = nb;
+                        if (_mm256_testz_si256(borrow, borrow)) break;
+                    }
                 }
-
             }
-
-
         }
+    }
 
-        
-        for (int j = 0; j < N0*NUM_SLICES_GF2X_ELEMENT; j++){
-            
-            bs_operand_t *bs_block = bs_unsatParityChecks;
-
-            bs_block[j] = bitslice_inc(bs_block[j], tmp_slice_1[j]);
-            bs_block[j] = bitslice_inc(bs_block[j], tmp_slice_2[j]);
-            
-            bs_block[j] = bitslice_dec(bs_block[j], tmp_slice_m1[j]);
-            bs_block[j] = bitslice_dec(bs_block[j], tmp_slice_m2[j]);
+    // aggiornamento finale con full adder: bs += delta
+    // delta è in complemento a due, quindi somma diretta
+    __m256i ones = _mm256_set1_epi64x(-1LL);
+    for (int c = 0; c < N0*NUM_SLICES_GF2X_ELEMENT; c++) {
+        __m256i carry = _mm256_setzero_si256();
+        for (int s = 0; s < BITSLICED_OPERAND_WIDTH; s++) {
+            __m256i a = bs_unsatParityChecks[c].slice[s];
+            __m256i d = delta[c].slice[s];
+            bs_unsatParityChecks[c].slice[s] = _mm256_xor_si256(a, _mm256_xor_si256(d, carry));
+            carry = _mm256_or_si256(
+                        _mm256_and_si256(a, d),
+                        _mm256_and_si256(carry, _mm256_xor_si256(a, d)));
         }
+    }
+    
     
 }
 
@@ -506,12 +536,13 @@ static inline int argmax_bitsliced_impv(const bs_operand_t* bs, int n_slices_tot
 int bf_decoding_CT(DIGIT out[], const POSITION_T HtrPosOnes[N0][V], const POSITION_T HPosOnes[N0][V], DIGIT privateSyndrome[])
 {
 
-    /* Densify h_0, h_1, ..., h_n0-1 
-    DIGIT HTr[N0][NUM_DIGITS_GF2X_ELEMENT] = {{0}};
-    for(int i=0; i<N0; i++) {
-        gf2x_mod_densify_VT(HTr[i],HtrPosOnes[i],V);
-    }
-    */
+   /* Densify h_0, h_1, ..., h_n0-1 
+   
+   DIGIT HTr[N0][NUM_DIGITS_GF2X_ELEMENT] = {{0}};
+   for(int i=0; i<N0; i++) {
+    gf2x_mod_densify_VT(HTr[i],HtrPosOnes[i],V);
+}
+*/
 
     int iter = 0;
     int hw = population_count(privateSyndrome);
@@ -533,6 +564,10 @@ int bf_decoding_CT(DIGIT out[], const POSITION_T HtrPosOnes[N0][V], const POSITI
     //compute_counters_sliced(bs_unsatParityChecks, sigma, N0*P, BITSLICED_OPERAND_WIDTH);
       
    do{
+
+
+    
+        //memset(update, 0, DIGIT_SIZE_B*NUM_DIGITS_GF2X_ELEMENT);
 
         /* APPROACH WITH COUNTER ARRAY UINT8 */
         //POSITION_T flip = argmax_avx2(sigma, N0*P);
@@ -580,7 +615,7 @@ int bf_decoding_CT(DIGIT out[], const POSITION_T HtrPosOnes[N0][V], const POSITI
         hw = population_count(privateSyndrome);
 
         iter++;
-   } while( (iter < 1.5*NUM_ERRORS_T) && (hw != 0) );
+   } while( (iter < 50) && (hw != 0) );
 
 
    /* Check the solution of the decoder */

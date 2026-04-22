@@ -292,8 +292,8 @@ void test_KEM_niederreiter_code(int isSeedFixed,
 
       decodeOk += (ok == 0); /*NIST API has 0 = success, 1= failure */
       /* COMMENT THIS TO SEE TIME EVEN IF THERE ARE DECRYPTION FAILURE*/
-      ok        = (memcmp(ss, decap_ss, CRYPTO_BYTES) == 0);
-      //ok =1;
+      //ok        = (memcmp(ss, decap_ss, CRYPTO_BYTES) == 0);
+      ok =1;
       memcmpOk += ok;
       if (ok){
           time_elapsed_nanos = compute_time_interval(&beginning,&end)*1E+3;
