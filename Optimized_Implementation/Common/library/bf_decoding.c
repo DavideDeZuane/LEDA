@@ -20,6 +20,61 @@
 #define N_REGS ((V + 7) / 8)
 
 
+void avx2_sub(uint8_t *dst, const uint8_t *a, const uint8_t *b)
+{
+    size_t i = 0;
+ 
+    for (; i + 32 <= N; i += 32) {
+        __m256i va = _mm256_loadu_si256((const __m256i *)(a + i));
+        __m256i vb = _mm256_loadu_si256((const __m256i *)(b + i));
+        __m256i vr = _mm256_subs_epu8(va, vb);   /* clamp a 0 */
+        _mm256_storeu_si256((__m256i *)(dst + i), vr);
+    }
+    /* Tail scalare (21766 % 32 = 6 elementi) */
+    for (; i < N; i++) {
+        dst[i] = a[i] > b[i] ? a[i] - b[i] : 0;
+    }
+}
+
+void avx2_block_shift(uint8_t *dst, const uint8_t *src, size_t shift)
+{
+    shift = shift % P;
+ 
+    /*
+     * Per ogni blocco lo shift circolare a destra di `shift` equivale a:
+     *   - copiare src[block_base + 0      .. block_base + R-shift-1]
+     *             -> dst[block_base + shift .. block_base + R-1]
+     *   - copiare src[block_base + R-shift .. block_base + R-1]
+     *             -> dst[block_base + 0    .. block_base + shift-1]
+     *
+     * Entrambe le copie sono sequenziali in memoria -> load/store AVX puri.
+     */
+    for (int blk = 0; blk < 2; blk++) {
+        const uint8_t *s = src + blk * P;
+        uint8_t       *d = dst + blk * P;
+ 
+        size_t tail = P - shift;   /* lunghezza della prima parte  */
+ 
+        /* Parte 1: s[0 .. tail-1] -> d[shift .. R-1] */
+        size_t i = 0;
+        for (; i + 32 <= tail; i += 32) {
+            __m256i v = _mm256_loadu_si256((const __m256i *)(s + i));
+            _mm256_storeu_si256((__m256i *)(d + shift + i), v);
+        }
+        for (; i < tail; i++)
+            d[shift + i] = s[i];
+ 
+        /* Parte 2: s[tail .. R-1] -> d[0 .. shift-1] */
+        size_t j = 0;
+        for (; j + 32 <= shift; j += 32) {
+            __m256i v = _mm256_loadu_si256((const __m256i *)(s + tail + j));
+            _mm256_storeu_si256((__m256i *)(d + j), v);
+        }
+        for (; j < shift; j++)
+            d[j] = s[tail + j];
+    }
+}
+
 
 static inline void shift_positions(
     const POSITION_T *in,
@@ -287,133 +342,6 @@ static inline void update_counters_bitsliced(
     POSITION_T       pos_flip
 ) {
 
-    #define DELTA_LAYERS 3
-    #define N_CHUNKS (N0*NUM_SLICES_GF2X_ELEMENT)
-
-    int b = pos_flip >= P ? 1 : 0;
-    POSITION_T local_pos = pos_flip - b * P;
-
-    // calcola row_indices in parallelo
-    POSITION_T row_indices[V];
-    shift_positions(HtrPosOnes[b], row_indices, V, local_pos);
-    
-    // maschere a DELTA_LAYERS bit per inc e dec
-    static __m256i inc_mask[N_CHUNKS][DELTA_LAYERS];
-    static __m256i dec_mask[N_CHUNKS][DELTA_LAYERS];
-    memset(inc_mask, 0, sizeof(inc_mask));
-    memset(dec_mask, 0, sizeof(dec_mask));
-
-    __m256i zero = _mm256_setzero_si256();
-    __m256i ones = _mm256_set1_epi64x(-1LL);
-
-    // pre-carica HPosOnes nei registri AVX512
-    // ogni registro ZMM contiene 16 uint32_t
-    #define N_REGS512 ((V + 15) / 16)
-    __m512i hpos_regs[N0][N_REGS512];
-    for (int b2 = 0; b2 < N0; b2++) {
-        for (int r = 0; r < N_REGS512; r++) {
-            uint32_t tmp[16] = {0};
-            for (int j = 0; j < 16 && r*16+j < V; j++)
-                tmp[j] = HPosOnes[b2][r*16+j];
-            hpos_regs[b2][r] = _mm512_loadu_si512((__m512i *)tmp);
-        }
-    }
-
-    __m512i vp512 = _mm512_set1_epi32((uint32_t)P);
-
-    for (int i = 0; i < V; i++) {
-        int straightIdx = (NUM_DIGITS_GF2X_ELEMENT * DIGIT_SIZE_b - 1) - row_indices[i];
-        DIGIT bit       = (syndrome[straightIdx / DIGIT_SIZE_b] >>
-                          (DIGIT_SIZE_b - 1 - straightIdx % DIGIT_SIZE_b)) & 1;
-        int d           = (int)(2 * bit) - 1;
-
-        __m512i vrow = _mm512_set1_epi32((uint32_t)row_indices[i]);
-
-        for (int b2 = 0; b2 < N0; b2++) {
-            for (int r = 0; r < N_REGS512; r++) {
-                // cols = (HPosOnes[b2] + row_index) % P con AVX512
-                __m512i col512 = _mm512_add_epi32(hpos_regs[b2][r], vrow);
-                // sottrazione condizionale
-                __mmask16 msk512 = _mm512_cmpge_epu32_mask(col512, vp512);
-                col512 = _mm512_mask_sub_epi32(col512, msk512, col512, vp512);
-
-                // calcola poly_idx, adjusted, chunk, lane, bit_in_lane per 16 cols
-                __m512i vpoly   = _mm512_sub_epi32(_mm512_set1_epi32(P - 1), col512);
-                __m512i vadj    = _mm512_add_epi32(vpoly, _mm512_set1_epi32(SLACK_SIZE));
-                __m512i vchunk  = _mm512_add_epi32(
-                                      _mm512_set1_epi32(b2 * NUM_SLICES_GF2X_ELEMENT),
-                                      _mm512_srli_epi32(vadj, 8));  // /256
-                __m512i vlane   = _mm512_and_epi32(
-                                      _mm512_srli_epi32(vadj, 6),   // /64
-                                      _mm512_set1_epi32(3));         // %4
-                __m512i vbit    = _mm512_sub_epi32(
-                                      _mm512_set1_epi32(63),
-                                      _mm512_and_epi32(vadj, _mm512_set1_epi32(63))); // %64
-
-                // estrai scalare e fai scatter sulle maschere
-                uint32_t chunks[16], lanes[16], bits[16];
-                _mm512_storeu_si512((__m512i *)chunks, vchunk);
-                _mm512_storeu_si512((__m512i *)lanes,  vlane);
-                _mm512_storeu_si512((__m512i *)bits,   vbit);
-
-                int valid = (r == N_REGS512 - 1) ? (V - r*16) : 16;
-                for (int j = 0; j < valid; j++) {
-                    __m256i mask = zero;
-                    ((uint64_t *)&mask)[lanes[j]] = (1ULL << bits[j]);
-
-                    if (d == 1) {
-                        __m256i carry = mask;
-                        for (int l = 0; l < DELTA_LAYERS; l++) {
-                            __m256i nc = _mm256_and_si256(inc_mask[chunks[j]][l], carry);
-                            inc_mask[chunks[j]][l] = _mm256_xor_si256(inc_mask[chunks[j]][l], carry);
-                            carry = nc;
-                            if (_mm256_testz_si256(carry, carry)) break;
-                        }
-                    } else {
-                        __m256i carry = mask;
-                        for (int l = 0; l < DELTA_LAYERS; l++) {
-                            __m256i nc = _mm256_and_si256(dec_mask[chunks[j]][l], carry);
-                            dec_mask[chunks[j]][l] = _mm256_xor_si256(dec_mask[chunks[j]][l], carry);
-                            carry = nc;
-                            if (_mm256_testz_si256(carry, carry)) break;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // aggiornamento finale
-    for (int c = 0; c < N_CHUNKS; c++) {
-        // bs += inc_mask
-        __m256i carry = zero;
-        for (int s = 0; s < BITSLICED_OPERAND_WIDTH; s++) {
-            __m256i a   = bs_unsatParityChecks[c].slice[s];
-            __m256i add = (s < DELTA_LAYERS) ? inc_mask[c][s] : zero;
-            bs_unsatParityChecks[c].slice[s] = _mm256_xor_si256(
-                                                   a, _mm256_xor_si256(add, carry));
-            carry = _mm256_or_si256(
-                        _mm256_and_si256(a, add),
-                        _mm256_and_si256(carry, _mm256_xor_si256(a, add)));
-        }
-
-        // bs -= dec_mask
-        __m256i br = zero;
-        for (int s = 0; s < BITSLICED_OPERAND_WIDTH; s++) {
-            __m256i a      = bs_unsatParityChecks[c].slice[s];
-            __m256i sub    = (s < DELTA_LAYERS) ? dec_mask[c][s] : zero;
-            __m256i not_a  = _mm256_xor_si256(a, ones);
-            __m256i new_br = _mm256_or_si256(
-                                 _mm256_and_si256(
-                                     _mm256_and_si256(not_a, sub),
-                                     _mm256_xor_si256(br, ones)),
-                                 _mm256_and_si256(
-                                     _mm256_or_si256(not_a, sub), br));
-            bs_unsatParityChecks[c].slice[s] = _mm256_xor_si256(
-                                                   a, _mm256_xor_si256(sub, br));
-            br = new_br;
-        }
-    }
 
 /*
 int b = pos_flip >= P ? 1 : 0;
@@ -482,6 +410,74 @@ POSITION_T local_pos = pos_flip - b * P;
         */
     
 }
+
+
+static inline void compute_counters_sparse(uint8_t *sigma, const POSITION_T H[2][V], const DIGIT *syndrome){
+
+// Precalcolo slack a compile time
+//const int   first_w    = SLACK_SIZE / 64;
+const int first_w = NUM_DIGITS_GF2X_ELEMENT - 1 - (P / DIGIT_SIZE_b);
+
+// Converti H in int32 per i load AVX2
+int32_t h32[2][V];
+for (int b = 0; b < 2; b++)
+    for (int j = 0; j < V; j++)
+        h32[b][j] = (int32_t)H[b][j];
+
+for (int b = 0; b < 2; b++) {
+    const int32_t *h  = h32[b];
+    uint8_t       *sig = sigma + b * P;
+
+    for (int w = first_w; w < NUM_DIGITS_GF2X_ELEMENT; w++) {
+        DIGIT word = syndrome[w];
+        
+        if (w == first_w) word &= SLACK_CLEAR_MASK;
+
+
+        if (word == 0) continue;
+
+        while (word) {
+            int bit      = __builtin_clzll(word);
+            int poly_idx = w * 64 + bit - SLACK_SIZE;
+
+            if (poly_idx >= P) break;
+
+            int32_t p  = (int32_t)((P - 1) - poly_idx);
+            __m256i vp = _mm256_set1_epi32(p);
+            __m256i vP = _mm256_set1_epi32((int32_t)P);
+
+            int j = 0;
+            for (; j <= V - 8; j += 8) {
+                __m256i vh       = _mm256_loadu_si256((const __m256i *)(h + j));
+                __m256i diff     = _mm256_sub_epi32(vp, vh);
+                __m256i adj      = _mm256_add_epi32(diff, vP);
+                __m256i neg_mask = _mm256_cmpgt_epi32(vh, vp);
+                __m256i ell_vec  = _mm256_blendv_epi8(diff, adj, neg_mask);
+
+                int32_t ells[8];
+                _mm256_storeu_si256((__m256i *)ells, ell_vec);
+
+                sig[ells[0]]++;
+                sig[ells[1]]++;
+                sig[ells[2]]++;
+                sig[ells[3]]++;
+                sig[ells[4]]++;
+                sig[ells[5]]++;
+                sig[ells[6]]++;
+                sig[ells[7]]++;
+            }
+            // coda scalare se V non è multiplo di 8
+            for (; j < V; j++) {
+                int32_t diff = p - h[j];
+                sig[diff >= 0 ? diff : diff + (int32_t)P]++;
+            }
+
+            word &= ~(1ULL << (63 - bit));
+        }
+    }
+}
+}
+
 
 
 static inline void update_counters_after_flip(uint8_t *sigma, const POSITION_T HtrPosOnes[N0][V], const POSITION_T  HPosOnes[N0][V], POSITION_T pos_flip, DIGIT* syndrome){
@@ -701,53 +697,36 @@ int bf_decoding_CT(
         gf2x_mod_densify_VT(HTr[i],HtrPosOnes[i],V);
     }
 
-    
-    DIGIT H_dense[N0][NUM_DIGITS_GF2X_ELEMENT] = {{0}};
-    for(int i=0; i<N0; i++) {
-        gf2x_mod_densify_VT(H_dense[i],HPosOnes[i],V);
-    }
 
     int iter = 0;
     int hw = population_count(privateSyndrome);
-    //DIGIT update[NUM_DIGITS_GF2X_ELEMENT] = {0};
-    bs_operand_t bs_unsatParityChecks[N0*NUM_SLICES_GF2X_ELEMENT];
-
-
+    
     DIGIT update[NUM_DIGITS_GF2X_ELEMENT];
-
+    /*
+    bs_operand_t bs_unsatParityChecks[N0*NUM_SLICES_GF2X_ELEMENT];
     memset(bs_unsatParityChecks, 0, sizeof(bs_unsatParityChecks));
     
-    /* COMPUTE COUNTERS WITH BITSLICED STRUCTURE */
     for (int i = 0; i < N0; i++) {
-         lift_mul_dense_to_sparse_CT(
+        lift_mul_dense_to_sparse_CT(
             bs_unsatParityChecks+(i*NUM_SLICES_GF2X_ELEMENT),
             privateSyndrome,
             HPosOnes[i],
             V
         );
     }
+    */
 
     uint8_t sigma[N0*P] __attribute__((aligned(32)));
     memset(sigma, 0, N0*P*sizeof(uint8_t));
     /* CONVERSION OF THE COUNTERS */
-    compute_counters_sliced(bs_unsatParityChecks, sigma, N0*P, BITSLICED_OPERAND_WIDTH);
+    //compute_counters_sliced(bs_unsatParityChecks, sigma, N0*P, BITSLICED_OPERAND_WIDTH);
 
 
-    /*
-    bs_operand_t product[N0*NUM_SLICES_GF2X_ELEMENT];
-    
-    for (int i = 0; i < N0; i++) {
-        lift_mul_dense_to_sparse_CT(
-            product+(i*NUM_SLICES_GF2X_ELEMENT),
-            HTr[0],
-            HPosOnes[i],
-            V
-        );
-    }
-    
-    */
+    compute_counters_sparse(sigma, HtrPosOnes, privateSyndrome);
+
 
    do{
+
 
         memset(update, 0, NUM_DIGITS_GF2X_ELEMENT*DIGIT_SIZE_B);
 
@@ -755,7 +734,7 @@ int bf_decoding_CT(
         POSITION_T flip = argmax_avx512(sigma, N0*P);
         /* APPROACH WITH COUNTER ARRAY BITSLICED */
         //POSITION_T flip = argmax_bitsliced_impv(bs_unsatParityChecks, N0 * NUM_SLICES_GF2X_ELEMENT);
-        
+
 
         /* FIND POSITION TO FLIP */
         int block    = flip / P;  // quale blocco di HTr
@@ -765,16 +744,20 @@ int bf_decoding_CT(
         gf2x_toggle_coeff(out + block * NUM_DIGITS_GF2X_ELEMENT, x);
 
         /* SCHOOLBOOK UPDATE OF THE SYNDROME */
-        gf2x_mod_mul_monom(update, x == 0 ? 0 :  x, HTr[block]);
-        gf2x_xor(privateSyndrome, update, privateSyndrome);
         // we can update the syndrome using the parallel shift position
         
         /* COUNTERS UPDATE  */
         /* APPROACH WITH COUNTER ARRAY UINT8 */
-        update_counters_after_flip(sigma, HtrPosOnes, HPosOnes, flip, privateSyndrome);
+
         /* APPROACH WITH COUNTER ARRAY BITSLICED */
         //update_counters_bitsliced(bs_unsatParityChecks, HtrPosOnes, HPosOnes, privateSyndrome, flip);
 
+        gf2x_mod_mul_monom(update, x == 0 ? 0 :  x, HTr[block]);
+        gf2x_xor(privateSyndrome, update, privateSyndrome);
+
+        
+        update_counters_after_flip(sigma, HtrPosOnes, HPosOnes, flip, privateSyndrome);
+        
         hw = population_count(privateSyndrome);
 
         iter++;
