@@ -172,7 +172,7 @@ void print_cycles_metrics(char tag[],
          N0
         );
  fprintf(stderr,
-         "& %4.1Lf ($\\pm$ %.1Lf) & %4.1Lf ($\\pm$ %.1Lf) & %4.1Lf ($\\pm$ %.1Lf) & %4.1Lf & %4.1Lf\\\\ \n",
+         "Keygen: %4.1Lf ($\\pm$ %.1Lf), Encrypt: %4.1Lf ($\\pm$ %.1Lf), Decrypt: %4.1Lf ($\\pm$ %.1Lf), Sum(K+E+D): %4.1Lf, Crypto Material: %4.1Lf\\\\ \n",
          welford_mean(keygen_stats)/1E+3,
          welford_stddev(keygen_stats)/1E+3,
          welford_mean(encrypt_stats)/1E+3,
