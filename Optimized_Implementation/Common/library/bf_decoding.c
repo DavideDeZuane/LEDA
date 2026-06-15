@@ -310,6 +310,7 @@ static inline int update_counters_uint8_v2(
      __m256i vpos = _mm256_set1_epi32((uint32_t)local_pos);
      // pre-carica HPosOnes[b2] nei registri AVX2 una volta sola
      __m256i h2_regs[N0][N_REGS];
+     #pragma GCC unroll 2
      for (int b2 = 0; b2 < N0; b2++) {
         int r;
         for (r = 0; r < N_REGS - 1; r++) {
@@ -335,6 +336,7 @@ static inline int update_counters_uint8_v2(
              syndrome_bits[row_index] ^= 1;
              int delta = (syndrome_bits[row_index] == 0) ? -1 : 1;
              hw += delta;
+             if(hw == 0) return hw;
              // int d           = (int)(2 * bit) - 1;
              __m256i vrow = _mm256_set1_epi32((uint32_t)row_index);
              for (int b2 = 0; b2 < N0; b2++) {
@@ -354,7 +356,8 @@ static inline int update_counters_uint8_v2(
      }
      return hw;
  }
- 
+
+
 
 
 static inline void compute_counters_uint8(

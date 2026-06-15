@@ -5,7 +5,7 @@ project(LEDAcrypt C)
 set(CC gcc)
 # set(CC clang)
 
-set(CMAKE_C_FLAGS  "${CMAKE_C_FLAGS} -Wall -pedantic -Wuninitialized -march=native -O3 -g3")
+set(CMAKE_C_FLAGS  "${CMAKE_C_FLAGS} -Wall -pedantic -Wuninitialized -march=native -O3 -g3 -mavx512f -mavx512cd -mavx512bw -mavx512vl")
 set(SANITIZE "")
 
 message("FLAGS" ${CMAKE_C_FLAGS})
