@@ -5,7 +5,7 @@ project(LEDAcrypt C)
 set(CC gcc)
 # set(CC clang)
 
-set(CMAKE_C_FLAGS  "${CMAKE_C_FLAGS} -Wall -pedantic -Wuninitialized -march=native -O3 -g3 -mavx512f -mavx512cd -mavx512bw -mavx512vl")
+set(CMAKE_C_FLAGS  "${CMAKE_C_FLAGS} -Wall -pedantic -Wuninitialized -mavx2 -mbmi -mbmi2 -mlzcnt -mpopcnt -mpclmul -maes -O3 -g3 ")
 set(SANITIZE "")
 
 message("FLAGS" ${CMAKE_C_FLAGS})
@@ -179,7 +179,60 @@ foreach(cipher KEM-CPA)
            set_target_properties(${TARGET_BINARY_NAME} PROPERTIES
                                     RUNTIME_OUTPUT_DIRECTORY ./bin/${cipher})
            set_property(TARGET ${TARGET_BINARY_NAME} APPEND PROPERTY
-            COMPILE_FLAGS "-DCATEGORY=${sl} -DN0=${nzero} ${KECCAK_EXTERNAL_ENABLE} ")
+            COMPILE_FLAGS "-DCATEGORY=${sl} -DN0=${nzero} ${KECCAK_EXTERNAL_ENABLE} -DCONSTANT_TIME=1")
+
+           # ---------------------------------------------------------------
+           # controllo constant-time con valgrind (poison.h)
+           # uso: valgrind --error-limit=no --suppressions=leda_ct.supp \
+           #        ./bin/KEM-CPA/LEDAcrypt_KEM-CPA_SL_1_N0_2_ctcheck decoder|decaps
+           # ---------------------------------------------------------------
+           set(CT_CHECK_TARGET ${TARGET_BINARY_NAME}_ctcheck)
+           add_executable(${CT_CHECK_TARGET}
+                              ${HEADERS}
+                              ${SOURCES}
+                              ./library/main_ct_check.c
+                              ./include/poison.h )
+           target_include_directories(${CT_CHECK_TARGET} PRIVATE
+                                          ${BASE_DIR}/${cipher}/include
+                                          ${BASE_DIR}/Common/include
+                                          /usr/local/include
+                                          ./include)
+           target_link_libraries(${CT_CHECK_TARGET} m ${SANITIZE} /usr/local/lib/libkeccak.a)
+           set_target_properties(${CT_CHECK_TARGET} PROPERTIES
+                                    RUNTIME_OUTPUT_DIRECTORY ./bin/${cipher})
+           set_property(TARGET ${CT_CHECK_TARGET} APPEND PROPERTY
+            COMPILE_FLAGS "-DCATEGORY=${sl} -DN0=${nzero} ${KECCAK_EXTERNAL_ENABLE} -DCONSTANT_TIME=1 -DCT_CHECK=1")
+
+           # ---------------------------------------------------------------
+           # t-test fixed-vs-random (dudect)
+           #   _ttest:            decoder intero o decapsulazione
+           #   _ttest_components: argmax, aggiornamento errore/sindrome, lift
+           # uso: taskset -c 1 ./bin/KEM-CPA/LEDAcrypt_KEM-CPA_SL_1_N0_2_ttest decoder 2000
+           #      taskset -c 1 ./bin/KEM-CPA/LEDAcrypt_KEM-CPA_SL_1_N0_2_ttest_components
+           # ---------------------------------------------------------------
+           set(TTEST_TARGET ${TARGET_BINARY_NAME}_ttest)
+           add_executable(${TTEST_TARGET} ${HEADERS} ${SOURCES} ./library/main_ttest.c)
+
+           # ttest_components.c include bf_decoding.c per usare le funzioni static:
+           # bf_decoding.c non va compilato anche come sorgente separato
+           set(SOURCES_NO_BF ${SOURCES})
+           list(REMOVE_ITEM SOURCES_NO_BF ${BASE_DIR}/Common/library/bf_decoding.c)
+           get_filename_component(BF_SOURCE_ABS ${BASE_DIR}/Common/library/bf_decoding.c ABSOLUTE)
+           set(TTEST_COMP_TARGET ${TARGET_BINARY_NAME}_ttest_components)
+           add_executable(${TTEST_COMP_TARGET} ${HEADERS} ${SOURCES_NO_BF} ./library/ttest_components.c)
+           target_compile_definitions(${TTEST_COMP_TARGET} PRIVATE "BF_SOURCE=\"${BF_SOURCE_ABS}\"")
+
+           foreach(tt ${TTEST_TARGET} ${TTEST_COMP_TARGET})
+             target_include_directories(${tt} PRIVATE
+                                            ${BASE_DIR}/${cipher}/include
+                                            ${BASE_DIR}/Common/include
+                                            /usr/local/include
+                                            ./include)
+             target_link_libraries(${tt} m ${SANITIZE} /usr/local/lib/libkeccak.a)
+             set_target_properties(${tt} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ./bin/${cipher})
+             set_property(TARGET ${tt} APPEND PROPERTY
+              COMPILE_FLAGS "-DCATEGORY=${sl} -DN0=${nzero} ${KECCAK_EXTERNAL_ENABLE} -DCONSTANT_TIME=1")
+           endforeach(tt)
        else()
           foreach(dfrlev 64 SL)
              set(TARGET_BINARY_NAME LEDAcrypt_${cipher}_SL_${sl}_N0_${nzero}_DFR_${dfrlev})
@@ -218,4 +271,4 @@ foreach(cipher KEM-CPA)
        endif()
      endforeach(sl)
    endforeach(nzero)
-endforeach(cipher)
+  endforeach(cipher)
